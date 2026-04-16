@@ -12,10 +12,12 @@ import {
   ChevronRight,
   ChevronLeft,
   Download,
-  Share2
+  Share2,
+  Wand2,
+  Loader2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { parseSlides, generateSlideImage, SlideContent, CarouselConfig } from './services/geminiService';
+import { parseSlides, generateSlideImage, editSlideImage, SlideContent, CarouselConfig } from './services/geminiService';
 import confetti from 'canvas-confetti';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -97,6 +99,7 @@ function CarouselApp() {
     primaryColor: '#FF6321',
     secondaryColor: '#FFFFFF',
     backgroundColor: '#0A0A0A',
+    consistentTheme: false,
   });
 
   const [headshot, setHeadshot] = useState<string | null>(null);
@@ -110,6 +113,10 @@ function CarouselApp() {
   const [isPasteModalOpen, setIsPasteModalOpen] = useState(false);
   const [bulkPasteText, setBulkPasteText] = useState('');
   const [isParsing, setIsParsing] = useState(false);
+  
+  const [isEditingImage, setIsEditingImage] = useState<string | null>(null);
+  const [editPrompt, setEditPrompt] = useState('');
+  const [isEditingLoading, setIsEditingLoading] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const logoInputRef = useRef<HTMLInputElement>(null);
@@ -159,6 +166,33 @@ function CarouselApp() {
     const newImages = { ...generatedImages };
     delete newImages[id];
     setGeneratedImages(newImages);
+  };
+
+  const handleEditImage = async () => {
+    if (!isEditingImage || !editPrompt.trim() || isEditingLoading) return;
+    
+    setIsEditingLoading(true);
+    setGenerationError(null);
+    
+    try {
+      const originalImage = generatedImages[isEditingImage];
+      if (!originalImage) throw new Error("Original image not found");
+      
+      const newImage = await editSlideImage(originalImage, editPrompt);
+      
+      setGeneratedImages(prev => ({
+        ...prev,
+        [isEditingImage]: newImage
+      }));
+      
+      setIsEditingImage(null);
+      setEditPrompt('');
+    } catch (error: any) {
+      console.error("Edit failed:", error);
+      setGenerationError(`Edit failed: ${error.message || String(error)}`);
+    } finally {
+      setIsEditingLoading(false);
+    }
   };
 
   const handleBulkPaste = async () => {
@@ -404,9 +438,13 @@ function CarouselApp() {
           timeoutId = setTimeout(() => reject(new Error(`Slide ${index + 1} generation timed out after 120 seconds`)), 120000);
         });
         
+        const imagePromise = generateSlideImage(slide, config, index, slides.length, headshot);
+        // Prevent unhandled promise rejection if it fails after timeout
+        imagePromise.catch(e => console.warn(`Background slide ${index + 1} generation failed (likely after timeout):`, e));
+        
         try {
           const imageUrl = await Promise.race([
-            generateSlideImage(slide, config, index, slides.length, headshot),
+            imagePromise,
             timeoutPromise
           ]);
           newImages[slide.id] = imageUrl;
@@ -684,8 +722,32 @@ function CarouselApp() {
               </div>
             </div>
 
+            {/* Layout Options */}
+            <div className="space-y-3 pt-2 border-t border-white/10">
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <label className="text-sm font-medium text-white">Consistent Slides</label>
+                  <p className="text-xs text-white/40">Use the same layout for all content slides</p>
+                </div>
+                <button
+                  onClick={() => setConfig({ ...config, consistentTheme: !config.consistentTheme })}
+                  className={cn(
+                    "relative inline-flex h-5 w-9 items-center rounded-full transition-colors",
+                    config.consistentTheme ? "bg-brand" : "bg-white/20"
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "inline-block h-3 w-3 transform rounded-full bg-white transition-transform",
+                      config.consistentTheme ? "translate-x-5" : "translate-x-1"
+                    )}
+                  />
+                </button>
+              </div>
+            </div>
+
             {/* Assets */}
-            <div className="space-y-4">
+            <div className="space-y-4 pt-2 border-t border-white/10">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-semibold text-white/60">Assets (Optional)</label>
                 <button className="text-[10px] font-bold text-brand uppercase tracking-wider">Apply All</button>
@@ -824,6 +886,15 @@ function CarouselApp() {
             <div className="flex items-center justify-between">
               <div className="text-sm font-medium text-white/40 uppercase tracking-widest">Live Preview</div>
               <div className="flex gap-2">
+                <button 
+                  onClick={() => setIsEditingImage(slides[activeSlide]?.id)}
+                  disabled={!generatedImages[slides[activeSlide]?.id] || isGenerating}
+                  className="px-3 py-2 bg-brand/20 text-brand rounded-lg hover:bg-brand/30 transition-all disabled:opacity-30 text-sm font-medium flex items-center gap-2"
+                  title="Magic Edit Image"
+                >
+                  <Wand2 className="w-4 h-4" />
+                  Edit
+                </button>
                 <button 
                   onClick={handleDownloadAll}
                   disabled={Object.keys(generatedImages).length === 0}
@@ -1007,6 +1078,86 @@ function CarouselApp() {
                     </>
                   ) : (
                     'Import Slides'
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Edit Image Modal */}
+      <AnimatePresence>
+        {isEditingImage && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => {
+                if (!isEditingLoading) {
+                  setIsEditingImage(null);
+                  setEditPrompt('');
+                }
+              }}
+              className="absolute inset-0 bg-black/80 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-md bg-card-dark border border-white/10 rounded-3xl p-8 shadow-2xl space-y-6"
+            >
+              <div className="flex items-center justify-between">
+                <h3 className="text-xl font-bold flex items-center gap-2">
+                  <Wand2 className="w-5 h-5 text-brand" />
+                  Magic Edit
+                </h3>
+                <button 
+                  onClick={() => {
+                    setIsEditingImage(null);
+                    setEditPrompt('');
+                  }}
+                  disabled={isEditingLoading}
+                  className="p-2 hover:bg-white/5 rounded-full transition-colors disabled:opacity-50"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <p className="text-sm text-white/40">
+                Describe what you want to change in the image. For example: "Fix the spelling of 'carousel'", "Make the background darker", or "Remove the logo".
+              </p>
+              <textarea
+                autoFocus
+                value={editPrompt}
+                onChange={(e) => setEditPrompt(e.target.value)}
+                placeholder="Enter your edit instructions..."
+                className="w-full h-32 bg-black/40 border border-white/10 rounded-2xl p-6 text-sm focus:outline-none focus:border-brand/50 transition-all resize-none custom-scrollbar"
+                disabled={isEditingLoading}
+              />
+              <div className="flex gap-4">
+                <button 
+                  onClick={() => {
+                    setIsEditingImage(null);
+                    setEditPrompt('');
+                  }}
+                  disabled={isEditingLoading}
+                  className="flex-1 py-3 bg-white/5 hover:bg-white/10 rounded-xl font-bold transition-all disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={handleEditImage}
+                  disabled={!editPrompt.trim() || isEditingLoading}
+                  className="flex-1 py-3 bg-brand text-black rounded-xl font-bold hover:bg-brand/90 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {isEditingLoading ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Editing...
+                    </>
+                  ) : (
+                    'Apply Edit'
                   )}
                 </button>
               </div>
